@@ -21,7 +21,9 @@ except ImportError:
 WORK_SECONDS = 25 * 60
 BREAK_SECONDS = 5 * 60
 POSTPONE_SECONDS = 5 * 60
-IDLE_RESET_SECONDS = 120
+# Idle shorter than this pauses the timer but doesn't reset it.
+# Idle as long as BREAK_SECONDS resets the timer.
+IDLE_PAUSE_SECONDS = 3
 WARN_BEFORE_SECONDS = 2 * 60  # notify-send warning this many seconds before break
 
 BG_COLOR = "#0d1117"
@@ -33,58 +35,84 @@ MUTED_COLOR = "#8b949e"
 
 
 class State:
-    def __init__(self):
+    def __init__(self, debug: bool = False):
         self._lock = threading.Lock()
-        self.last_activity = time.monotonic()
-        self.work_start = time.monotonic()
+        self.debug = debug
+        now = time.monotonic()
+        self.last_activity = now
+        # Accumulated work seconds (excluding the current active streak).
+        self.work_accumulated = 0.0
+        # Start of the current active streak; None when idle/on break.
+        self.active_since: float | None = now
+        # When the user went idle (None when active or on break).
+        self.idle_start: float | None = None
         self.on_break = False
         self.postponed_until = 0.0
-        self.warned = False  # True once the pre-break warning has fired this session
+        self.warned = False
+
+    # ── idle transition (active → idle) ───────────────────────────────────────
+
+    def check_idle(self):
+        """Freeze timer if no input for IDLE_PAUSE_SECONDS. Call from scheduler."""
+        now = time.monotonic()
+        with self._lock:
+            if self.active_since is not None and not self.on_break:
+                if now - self.last_activity >= IDLE_PAUSE_SECONDS:
+                    # Freeze: accumulate work up to last input, mark as idle
+                    self.work_accumulated += self.last_activity - self.active_since
+                    self.active_since = None
+                    self.idle_start = self.last_activity
+
+    # ── activity transition (idle → active) ───────────────────────────────────
 
     def record_activity(self):
         now = time.monotonic()
         with self._lock:
-            idle = now - self.last_activity
             self.last_activity = now
-            if not self.on_break and idle > IDLE_RESET_SECONDS:
-                self.work_start = now
-                self.warned = False
+            if self.idle_start is not None:
+                # Returning from idle
+                idle_duration = now - self.idle_start
+                self.idle_start = None
+                if idle_duration >= BREAK_SECONDS:
+                    # Long absence — reset, as if they took a full break
+                    self.work_accumulated = 0.0
+                    self.warned = False
+                # Resume active streak
+                self.active_since = now
+            elif self.active_since is None and not self.on_break:
+                # Shouldn't normally happen, but recover gracefully
+                self.active_since = now
 
-    def work_elapsed(self):
+    # ── timer queries ─────────────────────────────────────────────────────────
+
+    def work_elapsed(self) -> float:
+        now = time.monotonic()
         with self._lock:
             if self.on_break:
-                return 0
-            return time.monotonic() - self.work_start
+                return 0.0
+            extra = (now - self.active_since) if self.active_since is not None else 0.0
+            return self.work_accumulated + extra
 
-    def should_break(self):
+    def idle_elapsed(self) -> float:
+        now = time.monotonic()
+        with self._lock:
+            if self.idle_start is None:
+                return 0.0
+            return now - self.idle_start
+
+    def should_break(self) -> bool:
         now = time.monotonic()
         with self._lock:
             if self.on_break:
                 return False
             if now < self.postponed_until:
                 return False
-            return (now - self.work_start) >= WORK_SECONDS
+            if self.active_since is None:
+                return False  # idle — don't trigger while away
+            elapsed = self.work_accumulated + (now - self.active_since)
+            return elapsed >= WORK_SECONDS
 
-    def begin_break(self):
-        with self._lock:
-            self.on_break = True
-
-    def end_break_skip(self):
-        with self._lock:
-            self.on_break = False
-            self.work_start = time.monotonic()
-            self.postponed_until = 0.0
-            self.warned = False
-
-    def end_break_postpone(self):
-        with self._lock:
-            self.on_break = False
-            # Reset work timer so it triggers again after POSTPONE_SECONDS
-            self.work_start = time.monotonic() - (WORK_SECONDS - POSTPONE_SECONDS)
-            self.postponed_until = time.monotonic() + POSTPONE_SECONDS
-            self.warned = False
-
-    def should_warn(self):
+    def should_warn(self) -> bool:
         """Return True once when WARN_BEFORE_SECONDS remain before break."""
         now = time.monotonic()
         with self._lock:
@@ -92,11 +120,43 @@ class State:
                 return False
             if now < self.postponed_until:
                 return False
-            elapsed = now - self.work_start
+            if self.active_since is None:
+                return False  # idle — don't warn while away
+            elapsed = self.work_accumulated + (now - self.active_since)
             if elapsed >= (WORK_SECONDS - WARN_BEFORE_SECONDS):
                 self.warned = True
                 return True
             return False
+
+    # ── break lifecycle ───────────────────────────────────────────────────────
+
+    def begin_break(self):
+        now = time.monotonic()
+        with self._lock:
+            self.on_break = True
+            if self.active_since is not None:
+                self.work_accumulated += now - self.active_since
+                self.active_since = None
+            self.idle_start = None
+
+    def end_break_skip(self):
+        with self._lock:
+            self.on_break = False
+            self.work_accumulated = 0.0
+            self.active_since = time.monotonic()
+            self.idle_start = None
+            self.postponed_until = 0.0
+            self.warned = False
+
+    def end_break_postpone(self):
+        now = time.monotonic()
+        with self._lock:
+            self.on_break = False
+            self.work_accumulated = WORK_SECONDS - POSTPONE_SECONDS
+            self.active_since = now
+            self.idle_start = None
+            self.postponed_until = now + POSTPONE_SECONDS
+            self.warned = False
 
 
 # ── evdev monitoring ──────────────────────────────────────────────────────────
@@ -148,6 +208,17 @@ async def scheduler(state: State, ui_queue: queue.Queue):
     """Check work timer every second; put 'break' message in queue when due."""
     while True:
         await asyncio.sleep(1)
+        state.check_idle()
+        if state.debug:
+            elapsed = state.work_elapsed()
+            idle = state.idle_elapsed()
+            status = "IDLE" if idle > 0 else "ACTIVE"
+            mins, secs = divmod(int(elapsed), 60)
+            print(
+                f"[debug] {status:6s}  work={mins:02d}:{secs:02d}/{WORK_SECONDS // 60}:00"
+                f"  idle={idle:.0f}s",
+                flush=True,
+            )
         if state.should_warn():
             _notify(
                 f"Break in {WARN_BEFORE_SECONDS // 60} minutes",
@@ -280,7 +351,8 @@ class BreakWindow:
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    state = State()
+    debug = "--debug" in sys.argv
+    state = State(debug=debug)
     ui_queue: queue.Queue = queue.Queue()
 
     # Start evdev + scheduler in background thread
@@ -293,6 +365,8 @@ def main():
     root.title("watch-me")
 
     print("watch-me running — work timer started", flush=True)
+    if debug:
+        print("[debug] mode on — printing state every second", flush=True)
 
     def poll():
         try:
