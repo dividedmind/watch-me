@@ -196,7 +196,7 @@ async def hotplug_watcher(state: State, active: set, loop: asyncio.AbstractEvent
 def _notify(summary: str, body: str = "", urgency: str = "normal") -> None:
     """Fire a desktop notification via notify-send, silently ignoring errors."""
     try:
-        cmd = ["notify-send", "-a", "watch-me", f"-u{urgency}", summary]
+        cmd = ["notify-send", "-a", "watch-me", "-u", urgency, summary]
         if body:
             cmd.append(body)
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
