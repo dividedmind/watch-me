@@ -63,3 +63,23 @@ WARN_BEFORE_SECONDS = 2 * 60    # how early the pre-break notification fires
 ```bash
 journalctl --user -u watch-me -f
 ```
+
+## Querying Current State
+
+You can instantly peek at the current timer state using the Unix domain socket:
+
+```bash
+nc -U $XDG_RUNTIME_DIR/watch-me.sock
+```
+
+This returns a JSON payload containing the current status, work elapsed, work remaining, idle elapsed, and break status:
+
+```json
+{"status": "ACTIVE", "work_elapsed": 124, "work_remaining": 1376, "idle_elapsed": 0, "on_break": false}
+```
+
+This makes it extremely easy to parse with `jq` for status bar integrations (e.g., Polybar, Waybar, i3status):
+
+```bash
+nc -U $XDG_RUNTIME_DIR/watch-me.sock | jq -r '"\(.status) [\(.work_elapsed // 0)s]"'
+```

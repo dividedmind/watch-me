@@ -2,15 +2,31 @@
 """watch-me — gamepad-aware break reminder (25 min work / 5 min break)"""
 
 import asyncio
+import atexit
 import glob
+import json
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import font as tkfont
+
+CLEANUP_PATHS = []
+
+
+def cleanup_files():
+    for path in CLEANUP_PATHS:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+atexit.register(cleanup_files)
 
 try:
     import evdev
@@ -233,6 +249,79 @@ async def scheduler(state: State, ui_queue: queue.Queue):
                 await asyncio.sleep(0.5)
 
 
+async def state_socket_server(state: State):
+    """Serve real-time state as JSON over a Unix domain socket."""
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if not runtime_dir or not os.path.isdir(runtime_dir):
+        # Fallback to a user-writable directory (e.g., ~/.cache)
+        runtime_dir = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+        try:
+            os.makedirs(runtime_dir, exist_ok=True)
+        except OSError:
+            import tempfile
+            runtime_dir = tempfile.gettempdir()
+
+    socket_path = os.path.join(runtime_dir, "watch-me.sock")
+
+    # Clean up any stale socket from a previous run
+    try:
+        os.unlink(socket_path)
+    except OSError:
+        pass
+
+    # Register for atexit / SIGTERM cleanup
+    CLEANUP_PATHS.append(socket_path)
+
+    async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        try:
+            elapsed = state.work_elapsed()
+            idle = state.idle_elapsed()
+
+            if state.on_break:
+                status = "BREAK"
+            elif idle > 0:
+                status = "IDLE"
+            else:
+                status = "ACTIVE"
+
+            data = {
+                "status": status,
+                "work_elapsed": int(elapsed),
+                "work_remaining": max(0, WORK_SECONDS - int(elapsed)),
+                "idle_elapsed": int(idle),
+                "on_break": state.on_break,
+            }
+            writer.write(json.dumps(data).encode("utf-8") + b"\n")
+            await writer.drain()
+        except Exception:
+            pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    try:
+        server = await asyncio.start_unix_server(handle_client, path=socket_path)
+    except Exception as e:
+        print(f"Error starting state socket server: {e}", file=sys.stderr, flush=True)
+        if socket_path in CLEANUP_PATHS:
+            CLEANUP_PATHS.remove(socket_path)
+        return
+
+    try:
+        async with server:
+            await server.serve_forever()
+    finally:
+        try:
+            os.unlink(socket_path)
+        except OSError:
+            pass
+        if socket_path in CLEANUP_PATHS:
+            CLEANUP_PATHS.remove(socket_path)
+
+
 async def async_main(state: State, ui_queue: queue.Queue):
     loop = asyncio.get_running_loop()
     active: set = set()
@@ -244,6 +333,7 @@ async def async_main(state: State, ui_queue: queue.Queue):
 
     tasks.append(loop.create_task(hotplug_watcher(state, active, loop)))
     tasks.append(loop.create_task(scheduler(state, ui_queue)))
+    tasks.append(loop.create_task(state_socket_server(state)))
 
     await asyncio.gather(*tasks)
 
@@ -351,6 +441,15 @@ class BreakWindow:
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    def handle_signal(signum, frame):
+        sys.exit(0)
+
+    try:
+        signal.signal(signal.SIGTERM, handle_signal)
+        signal.signal(signal.SIGINT, handle_signal)
+    except ValueError:
+        pass
+
     debug = "--debug" in sys.argv
     state = State(debug=debug)
     ui_queue: queue.Queue = queue.Queue()
