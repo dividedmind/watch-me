@@ -184,6 +184,8 @@ async def monitor_device(path: str, state: State, active: set):
     try:
         dev = evdev.InputDevice(path)
     except (PermissionError, OSError):
+        if path not in active:
+            print(f"Warning: cannot access {path}", file=sys.stderr, flush=True)
         return
     active.add(path)
     try:
