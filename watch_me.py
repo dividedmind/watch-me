@@ -23,7 +23,7 @@ BREAK_SECONDS = 5 * 60
 POSTPONE_SECONDS = 5 * 60
 # Idle shorter than this pauses the timer but doesn't reset it.
 # Idle as long as BREAK_SECONDS resets the timer.
-IDLE_PAUSE_SECONDS = 3
+IDLE_PAUSE_SECONDS = 30
 WARN_BEFORE_SECONDS = 2 * 60  # notify-send warning this many seconds before break
 
 BG_COLOR = "#0d1117"
