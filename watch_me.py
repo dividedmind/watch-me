@@ -41,6 +41,11 @@ POSTPONE_SECONDS = 5 * 60
 # Idle as long as BREAK_SECONDS resets the timer.
 IDLE_PAUSE_SECONDS = 30
 WARN_BEFORE_SECONDS = 2 * 60  # notify-send warning this many seconds before break
+# In the last stretch before a break, show a live countdown notification and
+# stop freezing the timer on idle, so the break starts on time without
+# needing to wiggle the mouse.
+FINAL_COUNTDOWN_SECONDS = 15
+FINAL_NOTIFY_ID = 1270852743  # arbitrary fixed id so each tick replaces the previous one
 
 BG_COLOR = "#0d1117"
 FG_COLOR = "#e6edf3"
@@ -72,6 +77,10 @@ class State:
         now = time.time()
         with self._lock:
             if self.active_since is not None and not self.on_break:
+                elapsed = self.work_accumulated + (now - self.active_since)
+                if WORK_SECONDS - elapsed <= FINAL_COUNTDOWN_SECONDS:
+                    # Final stretch — let it run out on wallclock alone.
+                    return
                 if now - self.last_activity >= IDLE_PAUSE_SECONDS:
                     # Freeze: accumulate work up to last input, mark as idle
                     self.work_accumulated += self.last_activity - self.active_since
@@ -217,6 +226,22 @@ def _notify(summary: str, body: str = "", urgency: str = "normal") -> None:
         pass  # notify-send not installed
 
 
+def _notify_countdown(remaining: int) -> None:
+    """Update (in place) a live countdown notification with a progress bar."""
+    pct = round(100 * (FINAL_COUNTDOWN_SECONDS - remaining) / FINAL_COUNTDOWN_SECONDS)
+    try:
+        cmd = [
+            "notify-send", "-a", "watch-me", "-u", "critical",
+            "-r", str(FINAL_NOTIFY_ID),
+            "-h", f"int:value:{pct}",
+            "-t", "1500",
+            f"Break in {remaining}s",
+        ]
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        pass  # notify-send not installed
+
+
 async def scheduler(state: State, ui_queue: queue.Queue):
     """Check work timer every second; put 'break' message in queue when due."""
     while True:
@@ -232,6 +257,10 @@ async def scheduler(state: State, ui_queue: queue.Queue):
                 f"  idle={idle:.0f}s",
                 flush=True,
             )
+        if not state.on_break:
+            remaining = WORK_SECONDS - state.work_elapsed()
+            if 0 < remaining <= FINAL_COUNTDOWN_SECONDS:
+                _notify_countdown(int(remaining) + 1)
         if state.should_warn():
             _notify(
                 f"Break in {WARN_BEFORE_SECONDS // 60} minutes",
