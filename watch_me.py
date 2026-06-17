@@ -63,7 +63,6 @@ class State:
         # When the user went idle (None when active or on break).
         self.idle_start: float | None = None
         self.on_break = False
-        self.postponed_until = 0.0
         self.warned = False
 
     # ── idle transition (active → idle) ───────────────────────────────────────
@@ -121,8 +120,6 @@ class State:
         with self._lock:
             if self.on_break:
                 return False
-            if now < self.postponed_until:
-                return False
             if self.active_since is None:
                 return False  # idle — don't trigger while away
             elapsed = self.work_accumulated + (now - self.active_since)
@@ -133,8 +130,6 @@ class State:
         now = time.time()
         with self._lock:
             if self.on_break or self.warned:
-                return False
-            if now < self.postponed_until:
                 return False
             if self.active_since is None:
                 return False  # idle — don't warn while away
@@ -161,17 +156,17 @@ class State:
             self.work_accumulated = 0.0
             self.active_since = time.time()
             self.idle_start = None
-            self.postponed_until = 0.0
             self.warned = False
 
     def end_break_postpone(self):
-        now = time.time()
         with self._lock:
             self.on_break = False
+            # Resume as if WORK_SECONDS - POSTPONE_SECONDS were already
+            # worked, so the normal elapsed-time logic naturally triggers
+            # the next warning/break POSTPONE_SECONDS from now.
             self.work_accumulated = WORK_SECONDS - POSTPONE_SECONDS
-            self.active_since = now
+            self.active_since = time.time()
             self.idle_start = None
-            self.postponed_until = now + POSTPONE_SECONDS
             self.warned = False
 
 
