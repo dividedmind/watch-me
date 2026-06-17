@@ -54,7 +54,7 @@ class State:
     def __init__(self, debug: bool = False):
         self._lock = threading.Lock()
         self.debug = debug
-        now = time.monotonic()
+        now = time.time()
         self.last_activity = now
         # Accumulated work seconds (excluding the current active streak).
         self.work_accumulated = 0.0
@@ -70,7 +70,7 @@ class State:
 
     def check_idle(self):
         """Freeze timer if no input for IDLE_PAUSE_SECONDS. Call from scheduler."""
-        now = time.monotonic()
+        now = time.time()
         with self._lock:
             if self.active_since is not None and not self.on_break:
                 if now - self.last_activity >= IDLE_PAUSE_SECONDS:
@@ -82,7 +82,7 @@ class State:
     # ── activity transition (idle → active) ───────────────────────────────────
 
     def record_activity(self):
-        now = time.monotonic()
+        now = time.time()
         with self._lock:
             self.last_activity = now
             if self.idle_start is not None:
@@ -102,7 +102,7 @@ class State:
     # ── timer queries ─────────────────────────────────────────────────────────
 
     def work_elapsed(self) -> float:
-        now = time.monotonic()
+        now = time.time()
         with self._lock:
             if self.on_break:
                 return 0.0
@@ -110,14 +110,14 @@ class State:
             return self.work_accumulated + extra
 
     def idle_elapsed(self) -> float:
-        now = time.monotonic()
+        now = time.time()
         with self._lock:
             if self.idle_start is None:
                 return 0.0
             return now - self.idle_start
 
     def should_break(self) -> bool:
-        now = time.monotonic()
+        now = time.time()
         with self._lock:
             if self.on_break:
                 return False
@@ -130,7 +130,7 @@ class State:
 
     def should_warn(self) -> bool:
         """Return True once when WARN_BEFORE_SECONDS remain before break."""
-        now = time.monotonic()
+        now = time.time()
         with self._lock:
             if self.on_break or self.warned:
                 return False
@@ -147,7 +147,7 @@ class State:
     # ── break lifecycle ───────────────────────────────────────────────────────
 
     def begin_break(self):
-        now = time.monotonic()
+        now = time.time()
         with self._lock:
             self.on_break = True
             if self.active_since is not None:
@@ -159,13 +159,13 @@ class State:
         with self._lock:
             self.on_break = False
             self.work_accumulated = 0.0
-            self.active_since = time.monotonic()
+            self.active_since = time.time()
             self.idle_start = None
             self.postponed_until = 0.0
             self.warned = False
 
     def end_break_postpone(self):
-        now = time.monotonic()
+        now = time.time()
         with self._lock:
             self.on_break = False
             self.work_accumulated = WORK_SECONDS - POSTPONE_SECONDS
